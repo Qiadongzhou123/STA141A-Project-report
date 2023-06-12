@@ -1,0 +1,320 @@
+---
+title: "Prediction of neuronal activity in mouse visual cortex"
+author: "(Name：Qiadong Zhou and Student ID：921434632)"
+date: "2023-06-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = F,message = F)
+```
+
+
+
+# 1.Introduction
+
+The goal of the project is to build a predictive model capable of determining the outcome of each of a series of experiments performed on mice. The model will use neural activity data, specifically pulse sequences from the mouse visual cortex, as input, along with stimulus information in the form of left-right contrast.   
+
+The data for the project came from experiments conducted by Steinmetz et al. (2019), 10 of the mice underwent a total of 39 training sessions. Each session consisted of hundreds of trials in which visual stimuli were randomly presented on two screens located on either side of the mouse. The contrast levels of the stimulus vary, with values in the set {0, 0.25, 0.5, 1}, where 0 indicates no stimulus. The mice were tasked with making decisions based on visual stimuli, using wheels controlled by their front PAWS. They receive a reward or punishment, which is feedback, depending on the outcome of their decision.    
+
+The activity of neurons in the visual cortex of mice was recorded during the trial and provided in the form of pulse sequences, which are collections of time stamps corresponding to the firing of neurons. The project focused specifically on the sequence of neuronal spikes from the start of stimulation to 0.4 seconds after initiation, spanning 18 sessions (sessions 1 to 18) in four mice.   
+
+The project is divided into three parts. The first part involves exploratory data analysis aimed at describing data structures across sessions, exploring neural activity during each trial, changes across trials, and homogeneity and heterogeneity across sessions and mice. In the second part, we propose a method for integrating data across trials in an attempt to extract sharing patterns across sessions and resolve differences between sessions. The third part involves training a predictive model to predict outcomes (i.e. feedback types), which will be evaluated on two test sets of 100 trials randomly selected from Sections 1 and 18.    
+
+This report will systematically document the steps and results of each section and discuss their impact in the context of the project objectives.   
+
+
+# 2.Exploratory analysis.
+
+```{r}
+library(tidyverse)
+library(knitr)
+# Load the data 
+session=list()
+for(i in 1:18){
+  session[[i]]=readRDS(paste('~/Desktop/sessions/session',i,'.rds',sep=''))
+}
+
+# Summarize the information across sessions
+n.session=length(session)
+meta <- tibble(
+  mouse_name = rep('name',n.session),
+  date_exp =rep('dt',n.session),
+  n_brain_area = rep(0,n.session),
+  n_neurons = rep(0,n.session),
+  n_trials = rep(0,n.session),
+  success_rate = rep(0,n.session)
+)
+
+for(i in 1:n.session){
+  tmp = session[[i]]
+  meta[i,1]=tmp$mouse_name
+  meta[i,2]=tmp$date_exp
+  meta[i,3]=length(unique(tmp$brain_area))
+  meta[i,4]=dim(tmp$spks[[1]])[1]
+  meta[i,5]=length(tmp$feedback_type)
+  meta[i,6]=mean(tmp$feedback_type+1)/2
+}
+
+head(meta) %>% kable(digits = 3)
+```
+
+Variable information is as follows:   
+
+mouse_name: name of the mouse   
+date_exp: date of the experiment    
+n_brain_area: The number of different brain regions where neurons are located   
+n_neurons: Number of neurons    
+n_trials: Number of trials    
+success_rate: Trial success rate    
+
+## 2.1 Ranking of test success rates of different mice    
+
+```{r}
+meta %>% group_by(mouse_name) %>%
+  summarise(success_rate=mean(success_rate)) %>%
+  ggplot(aes(x=mouse_name,y=success_rate,fill=mouse_name))+
+  geom_bar(stat = "identity")+
+  labs(title="The success rate of different mice",x="The mouse's name",ylab="The success rate of the trials")+
+  theme_classic()
+  
+
+```
+
+
+## 3.2 Session Analysis
+
+To explore in more detail, we delved into one of these sessions. Here we use Session 2 as an example. The neurons in this session are located in the CA1, VISl, root, VISpm, and POST regions of the mouse brain. Our goal was to visualize activity in these areas across all trials.    
+
+We defined the "activity" of neurons as the average number of spikes during the trial. For each trial, we first counted the total number of spikes per neuron, and then the average number of spikes for neurons in the same region. We then apply this process to all trials in the session. The results are a summary of the average neural activity in each brain region during each trial.   
+
+
+```{r}
+i.s=2
+i.t=1
+average_spike_area<-function(i.t,this_session){
+  spk.trial = this_session$spks[[i.t]]
+  area= this_session$brain_area
+  spk.count=apply(spk.trial,1,sum)
+  spk.average.tapply=tapply(spk.count, area, mean)
+  return(spk.average.tapply)
+}
+
+
+average_spike_area(1,this_session = session[[i.s]])
+# Apply the function across all trials 
+n.trial=length(session[[i.s]]$feedback_type)
+n.area=length(unique(session[[i.s]]$brain_area ))
+
+trial.summary =matrix(nrow=n.trial,ncol= n.area+1+2+1)
+for(i.t in 1:n.trial){
+  trial.summary[i.t,]=c(average_spike_area(i.t,this_session = session[[i.s]]),
+                          session[[i.s]]$feedback_type[i.t],
+                        session[[i.s]]$contrast_left[i.t],
+                        session[[i.s]]$contrast_right[i.s],
+                        i.t)
+}
+
+colnames(trial.summary)=c(names(average_spike_area(i.t,this_session = session[[i.s]])), 'feedback', 'left contr.','right contr.','id' )
+
+# Turning it into a data frame
+trial.summary <- as_tibble(trial.summary)
+head(trial.summary)%>% kable(digits = 3) 
+```
+
+
+The data box includes the average peak count for each brain region, the type of feedback, the comparison of stimuli on both sides, and the trial ID for each trial.    
+
+Together, the exploratory analysis revealed the structure of the data and provided an initial insight into neural activity during the trial. The next steps involved investigating changes across trials and exploring homogeneity and heterogeneity across sessions and mice. These findings will guide us in integrating trial data and ultimately building predictive models.   
+
+```{r fig.width=8,fig.height=6}
+area.col=rainbow(n=n.area,alpha=0.7)
+
+plot(x=1,y=0, col='white',xlim=c(0,n.trial),ylim=c(0.5,2.2), xlab="Trials",ylab="Average spike counts", main=paste("Spikes per area in Session", i.s))
+
+
+for(i in 1:n.area){
+  lines(y=trial.summary[[i]],x=trial.summary$id,col=area.col[i],lty=2,lwd=1)
+  lines(smooth.spline(trial.summary$id, trial.summary[[i]]),col=area.col[i],lwd=3)
+  }
+legend("topright", 
+  legend = colnames(trial.summary)[1:n.area], 
+  col = area.col, 
+  lty = 1, 
+  cex = 0.8
+)
+```
+
+In the figure above, we can see that the changes in the VISpm region are not obvious while the changes in the CA1 region are extremely obvious, which indicates that the changes of VISpm are not obvious in the neuronal activity of stress response in mice.
+
+
+
+
+# 4 Predictive modeling.
+
+```{r}
+n_session <- length(session)
+for(i in 1:n_session){
+  df_spks <- session[[i]][[7]]
+  session[[i]]$mean_spks <- sapply(df_spks,mean)
+}
+
+
+result <- matrix(nrow=1,ncol= 6)
+
+for(i.s in 1:18){
+n.trial=length(session[[i.s]]$feedback_type) 
+mydata =matrix(nrow=n.trial,ncol= 6)
+for(i.t in 1:n.trial){
+mydata[i.t,]=c(session[[i.s]]$feedback_type[i.t],
+                        session[[i.s]]$contrast_left[i.t],
+                        session[[i.s]]$contrast_right[i.s],
+                        i.t,i.s,session[[i.s]]$mean_spks[i.t])
+}
+
+result <- rbind(result,mydata)
+}
+colnames(result) <- c("feedback","left_contr","right_contr","id", "session","mean_spks" )
+result <- result[-1,]
+result <- as_tibble(result)
+head(result) %>% kable(digits = 3)
+```
+
+
+
+# 5 Prediction performance on the test sets.
+
+## test set 
+
+```{r}
+test1 <- readRDS("~/Desktop/test/test1.rds")
+n_test1 <- length(session)
+for(i in 1:n_session){
+  df_spks <- session[[i]][[7]]
+  session[[i]]$mean_spks <- sapply(df_spks,mean)
+}
+test1$mean_spks <- sapply(test1[[7]],mean)
+df_test1 <- as.data.frame(test1[c(3,1,2,9)])
+colnames(df_test1) <- c("feedback","left_contr","right_contr","mean_spks")
+
+  
+  
+test2 <- readRDS("~/Desktop/test/test2.rds")
+n_test2 <- length(session)
+for(i in 1:n_session){
+  df_spks <- session[[i]][[7]]
+  session[[i]]$mean_spks <- sapply(df_spks,mean)
+}
+test2$mean_spks <- sapply(test2[[7]],mean)
+df_test2 <- as.data.frame(test2[c(3,1,2,9)])
+colnames(df_test2) <- c("feedback","left_contr","right_contr","mean_spks")
+
+
+```
+
+
+## GLM
+
+```{r}
+glmdata <- result
+glmdata$feedback <- ifelse(glmdata$feedback==1,1,0)
+mod1 <- glm(feedback~left_contr+right_contr+mean_spks,data=glmdata,family = binomial)
+summary(mod1)
+```
+
+According to the results of the model   
+
+left_contr: The coefficient of left_contr is positive (0.15437), which means that as the contrast of the left stimulus increases, the logarithmic probability of success (feedback = 1) also increases, while holding all other variables constant. However, the P-value associated with this coefficient was 0.0539, slightly above the commonly used statistical significance threshold of 0.05. This suggests that while the probability of success of the model prediction increases with increasing left_contr, the result may not be statistically significant.   
+
+right_contr: The coefficient of right_contr is negative (-0.11476), indicating that the logarithmic probability of success (feedback = 1) decreases as the contrast of the correct stimulus increases, assuming all other variables remain constant. The P-value of this coefficient is 0.1146, which is higher than the commonly used statistical significance threshold of 0.05. This suggests that the relationship observed in the data may be due to chance rather than a true effect.    
+
+mean_spks: The coefficient of mean_spks is very large and positive (21.95026), indicating that as the average number of spikes per neuron increases, the logarithmic probability of success (feedback = 1) also increases substantially, assuming all other variables remain constant. The P-value of this coefficient is very small (5.89e-16), which is far below the threshold of 0.05, indicating that the result is statistically significant.    
+
+The model suggests that mean_spks are important predictors of success, while left_contr and right_contr may not be important predictors based on the model.   
+
+
+### test 1
+
+```{r}
+cutoff <- sum(glmdata$feedback)/nrow(glmdata)
+pre1 <- ifelse(predict(mod1,newdata = df_test1,type="response")>cutoff,1,-1)
+
+library(pROC)
+roc_obj <- roc(df_test1$feedback,pre1)
+plot(roc_obj,main="Roc for Test 1")
+text(paste("AUC=", round(auc(roc_obj),4)),x=0.5,y=0.2)
+library(caret)
+confusionMatrix(table(pre1, df_test1$feedback))
+
+```
+
+For test1's data, the model has an AUC of 0.6865    
+
+Confusion matrix: The confusion matrix shows that it correctly predicted 19 out of 41 actual negative feedbacks (-1) and 50 out of 59 actual positive feedbacks (1).   
+
+Accuracy: The model has an accuracy of 0.69, which means that the model correctly predicted the type of feedback for 69% of the trials in the test data.    
+
+Sensitivity: The model has a sensitivity (or recall rate) of 0.6786, which means that the model correctly identifies 68% of all actual negative feedback (-1).   
+
+Specificity: The model had a specificity of 0.6944, indicating that the model correctly identified 69% of all actual positive feedback (1).   
+
+Positive predicted value (PPV) or accuracy: PPV is 0.4634, which indicates that when the model predicts negative feedback (-1), it is correct about 46% of the time.    
+
+Negative predictive value (NPV) : The NPV is 0.8475, which means that when the model predicts a positive feedback (1), it is correct about 85% of the time.    
+
+The model's performance, while not perfect, is quite good. However, it seems to be better at predicting positive feedback (1) than negative feedback (-1)   
+
+
+
+
+### test 2
+
+```{r}
+pre2 <- ifelse(predict(mod1,newdata = df_test2,type="response")>cutoff,1,-1)
+
+library(pROC)
+roc_obj <- roc(df_test2$feedback,pre2)
+plot(roc_obj,main="Roc for Test 2")
+text(paste("AUC=", round(auc(roc_obj),4)),x=0.5,y=0.2)
+library(caret)
+confusionMatrix(table(pre2, df_test2$feedback))
+```
+For the data from test2, the model has an AUC of 0.5246   
+
+Confusion matrix: The confusion matrix shows that it correctly predicted 25 out of 89 actual negative feedback (-1) and 9 out of 1 actual positive feedback (1).    
+
+Accuracy: The model has an accuracy of 0.34, which means that the model correctly predicted the type of feedback for 34% of the trials in the test data. However, the accuracy is significantly lower than the no-information rate (NIR) of 0.73. NIR is the accuracy achieved by always predicting the category most frequently. This indicates that the model does not perform very well on this test set.   
+
+Sensitivity: The sensitivity (or recall rate) of the model is 0.9259, which means that the model correctly identifies 93% (-1) of all actual negative feedback.    
+
+Specificity: The model has a specificity of 0.1233, indicating that the model correctly identifies 12% of all actual positive feedbacks (1).   
+
+Positive predicted value (PPV) or accuracy: PPV is 0.2809, which indicates that when the model predicts negative feedback (-1), it is correct about 28% of the time.    
+
+Negative predictive value (NPV) : The NPV is 0.8182, which means that when the model predicts a positive feedback (1), it is correct about 82% of the time.    
+
+Overall, the model seems to have some advantages, such as high sensitivity. However, it also has significant disadvantages, including lower accuracy and specificity. The model seems to be biased towards predicting success, which leads to a large number of false positives.    
+
+
+# 6 Discussion.
+
+The aim of this data analysis project was to develop a predictive model for determining the outcome of experiments in mice, using as input neuronal activity data from the mouse visual cortex. The project consists of three main components: exploratory data analysis, conversational analytics, and predictive modeling. In this discussion, we summarize the main findings and their implications for the project goals.    
+
+Exploratory analysis provided initial insights into data structure and neural activity during trials. It revealed the distribution of data across sessions and mice, as well as changes in neural activity across trials. The analysis also highlighted heterogeneity and homogeneity between sessions and mice. These findings guide the next steps in integrating experimental data and building predictive models.   
+
+In the session analysis, one specific session (session 2) was examined in detail to visualize the activity of different brain regions across all trials. The analysis focused on measuring the average number of spikes in neuronal activity. The results showed that the changes in the CA1 region were very pronounced, while those in the VISpm region were less pronounced. This observation suggests that stress responses in mice may be poorly reflected in neuronal activity in the VISpm region.    
+
+The predictive modeling component involves training a model based on stimulus information and neural activity data to predict outcomes. The model uses variables such as left stimulus contrast, right stimulus contrast, and average number of spikes per neuron as predictors. The coefficients for these variables indicate their effect on the probability of success (feedback = 1). The model shows that the mean number of spikes per neuron (mean_spks) is a significant predictor of success, whereas the effects of left stimulus contrast (left_contr) and right stimulus contrast (right_contr) are less clear and may not be statistically significant.    
+
+The predictive performance of the model was evaluated on two test sets. For test set 1, the AUC of the model is 0.6865, indicating that the prediction accuracy is in the middle level. The confusion matrix shows that the model correctly predicts most positive feedback (1), but is less accurate at predicting negative feedback (-1). Calculate the sensitivity, specificity, and positive predictive value of the model to assess its performance.   
+
+However, the performance on test set 2 is significantly worse with an AUC of 0.5246 and lower accuracy compared to the non-informative rate (NIR). The model has high sensitivity in identifying negative feedback (-1), but low specificity and more false positives.    
+
+In summary, the predictive model performs mediocrely on one test set, but poorly on another. The model is effective in predicting positive feedback (1), but has limitations in predicting negative feedback (-1). These findings suggest that there may be biases or limitations in the model's ability to generalize to different test sets or capture the complexity of the underlying data.    
+
+The limitations of the model and the differences between the test sets indicate the need for further improvement and exploration. Possible areas of improvement include incorporating additional features or variables, exploring different modeling approaches, and increasing the size and diversity of training and testing datasets. Future research could also consider investigating the underlying causes of the observed biases and exploring ways to mitigate them.   
+
+Overall, this project provides valuable insights into predicting the outcome of neuronal activity in the mouse visual cortex. Although the model has achieved moderate success in predicting positive feedback, further research and refinement are needed to improve its performance and generalization.   
+
+
+
